@@ -170,11 +170,10 @@ class FilesystemBasedCache(Cache):
 
         def read_parts(self, size: int = DEFAULT_PART_SIZE) -> Iterator[bytes]:
             while True:
-                data = self.file.read(size)
-                if not data:
+                if data := self.file.read(size):
+                    yield data
+                else:
                     break
-
-                yield data
 
         def read_all(self) -> bytes:
             return self.file.read()
@@ -249,7 +248,6 @@ class Requests:
                           url: str,
                           size: int = DEFAULT_PART_SIZE) -> AsyncIterator[bytes]:
         raise NotImplementedError
-        yield b''  # Silence mypy.
 
     async def _read_all(self, url: str) -> bytes:
         raise NotImplementedError
@@ -310,11 +308,10 @@ class UrllibRequests(Requests):
                           size: int = DEFAULT_PART_SIZE) -> AsyncIterator[bytes]:
         with urllib.request.urlopen(url) as response:
             while True:
-                data = response.read(size)
-                if not data:
+                if data := response.read(size):
+                    yield data
+                else:
                     return
-
-                yield data
 
     async def _read_all(self, url: str) -> bytes:
         with urllib.request.urlopen(url) as response:
@@ -417,10 +414,7 @@ class IntegrityBuilder:
 
     def update(self, data: Union[str, bytes]) -> None:
         data_bytes: bytes
-        if isinstance(data, str):
-            data_bytes = data.encode()
-        else:
-            data_bytes = data
+        data_bytes = data.encode() if isinstance(data, str) else data
         self._hasher.update(data_bytes)
 
     def build(self) -> Integrity:
@@ -496,11 +490,10 @@ class ResolvedSource(NamedTuple):
     async def retrieve_integrity(self) -> Integrity:
         if self.integrity is not None:
             return self.integrity
-        else:
-            url = self.resolved
-            assert url is not None, 'registry source has no resolved URL'
-            metadata = await RemoteUrlMetadata.get(url, cachable=True)
-            return metadata.integrity
+        url = self.resolved
+        assert url is not None, 'registry source has no resolved URL'
+        metadata = await RemoteUrlMetadata.get(url, cachable=True)
+        return metadata.integrity
 
 
 class UnresolvedRegistrySource:
@@ -886,7 +879,7 @@ class SpecialSourceProvider:
         # XXX: a tad ugly
         match = re.search(r"exports\.version = '([^']+)'", js.decode())
         assert match is not None, f'Failed to get ChromeDriver binary version from {url}'
-        return match.group(1)
+        return match[1]
 
     async def _handle_electron_chromedriver(self, package: Package) -> None:
         manager = await ElectronBinaryManager.for_version(package.version)
@@ -929,11 +922,7 @@ class SpecialSourceProvider:
                                         headers_metadata.integrity,
                                         destination=headers_dest)
 
-        if flavor == 'normal':
-            filename_base = 'nwjs'
-        else:
-            filename_base = f'nwjs-{flavor}'
-
+        filename_base = 'nwjs' if flavor == 'normal' else f'nwjs-{flavor}'
         destdir = self.gen.data_root / 'nwjs-cache'
         nwjs_arch_map = [
             ('x86_64', 'linux-x64', 'linux64'),
@@ -995,7 +984,7 @@ class SpecialSourceProvider:
             resp = await Requests.instance.read_all(url, cachable=True)
             match = tag_re.search(resp.decode())
             assert match is not None
-            return match.group(1)
+            return match[1]
 
         tag = await get_ripgrep_tag(package.version)
         ripgrep_arch_map = {
@@ -1017,9 +1006,9 @@ class SpecialSourceProvider:
     async def _handle_playwright(self, package: Package) -> None:
         base_url = f'https://github.com/microsoft/playwright/raw/v{package.version}/'
         if StrictVersion(package.version) >= StrictVersion('1.16.0'):
-            browsers_json_url = base_url + 'packages/playwright-core/browsers.json'
+            browsers_json_url = f'{base_url}packages/playwright-core/browsers.json'
         else:
-            browsers_json_url = base_url + 'browsers.json'
+            browsers_json_url = f'{base_url}browsers.json'
         browsers_json = json.loads(await Requests.instance.read_all(browsers_json_url,
                                                                     cachable=True))
         for browser in browsers_json['browsers']:
@@ -1099,15 +1088,16 @@ class SpecialSourceProvider:
     def _handle_electron_builder(self, package: Package) -> None:
         destination = self.gen.data_root / 'electron-builder-arch-args.sh'
 
-        script: List[str] = []
-        script.append('case "$FLATPAK_ARCH" in')
-
+        script: List[str] = ['case "$FLATPAK_ARCH" in']
         for electron_arch, flatpak_arch in (
                 ElectronBinaryManager.ELECTRON_ARCHES_TO_FLATPAK.items()):
-            script.append(f'"{flatpak_arch}")')
-            script.append(f'  export ELECTRON_BUILDER_ARCH_ARGS="--{electron_arch}"')
-            script.append('  ;;')
-
+            script.extend(
+                (
+                    f'"{flatpak_arch}")',
+                    f'  export ELECTRON_BUILDER_ARCH_ARGS="--{electron_arch}"',
+                    '  ;;',
+                )
+            )
         script.append('esac')
 
         self.gen.add_script_source(script, destination)
@@ -1219,7 +1209,7 @@ class NpmModuleProvider(ModuleProvider):
 
     def get_cacache_integrity_path(self, integrity: Integrity) -> Path:
         digest = integrity.digest
-        return Path(digest[0:2]) / digest[2:4] / digest[4:]
+        return Path(digest[:2]) / digest[2:4] / digest[4:]
 
     def get_cacache_index_path(self, integrity: Integrity) -> Path:
         return self.cacache_dir / Path('index-v5') / self.get_cacache_integrity_path(
@@ -1409,7 +1399,7 @@ class NpmModuleProvider(ModuleProvider):
             patch_dest = self.gen.data_root / 'patch' / self.relative_lockfile_dir(
                 lockfile)
             # Don't use with_extension to avoid problems if the package has a . in its name.
-            patch_dest = patch_dest.with_name(patch_dest.name + '.sh')
+            patch_dest = patch_dest.with_name(f'{patch_dest.name}.sh')
 
             self.gen.add_script_source(patch_commands[lockfile], patch_dest)
             patch_all_commands.append(f'$FLATPAK_BUILDER_BUILDDIR/{patch_dest}')
@@ -1438,11 +1428,10 @@ class YarnLockfileProvider(LockfileProvider):
         return False
 
     def unquote(self, string: str) -> str:
-        if string.startswith('"'):
-            assert string.endswith('"')
-            return string[1:-1]
-        else:
+        if not string.startswith('"'):
             return string
+        assert string.endswith('"')
+        return string[1:-1]
 
     def parse_package_section(self, lockfile: Path, section: List[str]) -> Package:
         assert section
@@ -1500,10 +1489,9 @@ class YarnLockfileProvider(LockfileProvider):
                 if not line.strip() or line.strip().startswith('#'):
                     continue
 
-                if not line[0].isspace():
-                    if section:
-                        yield self.parse_package_section(lockfile, section)
-                        section = []
+                if not line[0].isspace() and section:
+                    yield self.parse_package_section(lockfile, section)
+                    section = []
 
                 section.append(line)
 
@@ -1612,7 +1600,7 @@ class GeneratorProgress(contextlib.AbstractContextManager):
         result = f'{package.name} @ {package.version}'
 
         if len(result) > max_width:
-            result = result[:max_width - 3] + '...'
+            result = f'{result[:max_width - 3]}...'
 
         return result
 
